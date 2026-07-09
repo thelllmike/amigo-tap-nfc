@@ -1,0 +1,10 @@
+# build artifacts
+*.o
+nfctag
+AmigoTapNFC
+AppIcon.icns
+AppIcon.iconset/
+dmg_stage/
+*.dmg
+AmigoTap NFC.app/
+.DS_Store
