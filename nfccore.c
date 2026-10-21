@@ -101,11 +101,73 @@ static void parse_ndef(BYTE *m,int ml){
   if(!found) L("  (no NDEF record — tag is blank or not NDEF-formatted)\n");
 }
 
+/* ---- NTAG21x (NFC Forum Type 2: NTAG213/215/216 coins, stickers, cards) ----
+   4-byte pages, no keys. Page 3 = capability container (E1 10 <size/8> 00),
+   NDEF TLV starts at page 4. */
+static int is_ntag(void){
+  BYTE atr[64]; DWORD al=sizeof(atr), st, pr, nl=0;
+  if(SCardStatus(g_card,NULL,&nl,&st,&pr,atr,&al)) return 0;
+  /* ACR122U ATR bytes 13-14 = PC/SC card name: 0001 Classic 1K, 0003 Ultralight/NTAG */
+  return al>=15 && atr[13]==0x00 && atr[14]==0x03;
+}
+static int ntag_size(void){                       /* user memory bytes from GET_VERSION, 0 if unknown */
+  BYTE o[300]; DWORD ol; BYTE gv[]={0xFF,0,0,0,3,0xD4,0x42,0x60};
+  if(!transmit(gv,sizeof(gv),o,&ol)||ol<13||o[0]!=0xD5||o[2]!=0x00) return 0;
+  switch(o[9]){ case 0x0F: L("Tag: NTAG213\n"); return 144;
+                case 0x11: L("Tag: NTAG215\n"); return 504;
+                case 0x13: L("Tag: NTAG216\n"); return 888; }
+  return 0;
+}
+static int rpages(int pg,BYTE *d){ return rblk(pg,d); }   /* READ returns 4 pages (16 bytes) */
+static int wpage(int pg,const BYTE *d){ BYTE o[300]; DWORD ol; BYTE w[9]={0xFF,0xD6,0,(BYTE)pg,4};
+  memcpy(w+5,d,4);
+  if(!transmit(w,sizeof(w),o,&ol)||!sw_ok(o,ol)){ L("  ! write page %d failed (SW=%02X%02X)\n",pg,ol>=2?o[ol-2]:0,ol>=2?o[ol-1]:0); return 0; }
+  return 1; }
+static int ntag_dump(BYTE *mem,int size){         /* read the user area (pages 4..) into mem */
+  for(int off=0;off<size;off+=16){ if(!rpages(4+off/4,mem+off)) return 0; }
+  return 1;
+}
+
+static int ntag_read(void){
+  BYTE cc[16]; int size=ntag_size();
+  if(!rpages(0,cc)){ L("Could not read tag.\n"); return 1; }
+  if(cc[12]!=0xE1){ L("  (tag is not NDEF-formatted)\n"); return 0; }
+  if(!size) size=cc[14]*8;
+  BYTE mem[1024]; if(size>(int)sizeof(mem)-16) size=sizeof(mem)-16;
+  if(!ntag_dump(mem,size)){ L("Read failed. Try re-seating the tag.\n"); return 1; }
+  parse_ndef(mem,size); return 0;
+}
+
+static int ntag_write(const BYTE *ndef,int nl){
+  BYTE cc[16]; int size=ntag_size();
+  if(!rpages(0,cc)){ L("Could not read tag.\n"); return 1; }
+  if(cc[12]==0x00 && cc[13]==0x00 && cc[14]==0x00 && cc[15]==0x00){   /* blank CC: format */
+    if(!size){ L("Unknown tag size; cannot format.\n"); return 1; }
+    BYTE ncc[4]={0xE1,0x10,(BYTE)(size/8),0x00};
+    if(!wpage(3,ncc)) return 1; L("Formatted tag for NDEF.\n");
+  } else if(cc[12]!=0xE1){ L("Tag has an unknown capability container; not writing.\n"); return 1; }
+  else if(cc[15]!=0x00){ L("Tag is write-protected (locked).\n"); return 1; }
+  else if(!size) size=cc[14]*8;
+
+  BYTE area[1024]; memset(area,0,sizeof(area)); int t=0;
+  area[t++]=0x03;
+  if(nl<0xFF) area[t++]=(BYTE)nl; else { area[t++]=0xFF; area[t++]=(nl>>8)&0xFF; area[t++]=nl&0xFF; }
+  if(t+nl+1>size){ L("Message too big for this tag (%d bytes max).\n",size-t-1); return 1; }
+  memcpy(area+t,ndef,nl); t+=nl; area[t++]=0xFE;
+  for(int i=0;i<t;i+=4) if(!wpage(4+i/4,area+i)){ L("\nWrite failed. Try re-seating the tag.\n"); return 1; }
+
+  BYTE mem[1024]; int rl=(t+15)&~15;
+  if(!ntag_dump(mem,rl)){ L("Written, but read-back failed.\n"); return 1; }
+  L("\nDone. Verified on tag:\n");
+  parse_ndef(mem,rl); return 0;
+}
+
 int amigo_read(char *log,int cap){
   g_p=log; g_end=log+cap; if(cap>0) log[0]=0;
   if(!nconnect()) return 1;
   BYTE uid[300]; DWORD ul; BYTE gu[]={0xFF,0xCA,0,0,0};
   if(transmit(gu,sizeof(gu),uid,&ul)&&ul>=2){ L("UID: "); for(DWORD i=0;i+2<=ul;i++) L("%02X",uid[i]); L("\n"); }
+  if(is_ntag()){ int r=ntag_read(); ndisconnect(); return r; }
   BYTE mem[45*16]; int ml=0,sec_ok=0;
   for(int s=1;s<16;s++){ int base=s*4;
     if(!(nauth(base,KEY_NDEF)||nauth(base,KEY_FF)||nauth(base,KEY_MAD))) continue; sec_ok++;
@@ -119,15 +181,18 @@ int amigo_read(char *log,int cap){
 int amigo_write(const char *value,int as_text,char *log,int cap){
   g_p=log; g_end=log+cap; if(cap>0) log[0]=0;
   if(!value||!value[0]){ L("Nothing to write — enter a link or text first.\n"); return 1; }
+  if(strlen(value)>850){ L("Too long — max ~850 characters.\n"); return 1; }
   BYTE ndef[900]; int nl=build_ndef(value,as_text,ndef);
+  L("Writing %s record (%d bytes)...\n", as_text?"text":"link", nl);
+  if(!nconnect()) return 1;
+  if(is_ntag()){ int r=ntag_write(ndef,nl); ndisconnect(); return r; }
+
   BYTE area[45*16]; memset(area,0,sizeof(area)); int t=0;
   area[t++]=0x03;
   if(nl<0xFF) area[t++]=(BYTE)nl; else { area[t++]=0xFF; area[t++]=(nl>>8)&0xFF; area[t++]=nl&0xFF; }
-  if(t+nl+1 > (int)sizeof(area)){ L("Message too big for a 1K tag.\n"); return 1; }
+  if(t+nl+1 > (int)sizeof(area)){ L("Message too big for a 1K tag.\n"); ndisconnect(); return 1; }
   memcpy(area+t,ndef,nl); t+=nl; area[t++]=0xFE;
-  L("Writing %s record (%d bytes)...\n", as_text?"text":"link", nl);
 
-  if(!nconnect()) return 1;
   BYTE mad[32]; memset(mad,0,sizeof(mad)); mad[1]=0x01;
   for(int s=0;s<15;s++){ mad[2+s*2]=0x03; mad[2+s*2+1]=0xE1; } mad[0]=mad_crc(mad+1,31);
 

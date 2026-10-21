@@ -26,7 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         _ = label("AmigoTap NFC", 420, 20, bold: true)
-        _ = label("Place a MIFARE Classic tag on the ACR122U reader, then choose an action.", 396, 11)
+        _ = label("Place a tag or coin (MIFARE Classic or NTAG213/215/216) on the ACR122U, then choose an action.", 396, 11)
         _ = label("Link or text:", 362)
 
         input = NSTextField(frame: NSRect(x: 20, y: 332, width: 520, height: 24))

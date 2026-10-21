@@ -1,6 +1,6 @@
 # AmigoTap NFC
 
-Read and write **NDEF links** to MIFARE Classic 1K NFC tags using an
+Read and write **NDEF links** to MIFARE Classic 1K and NTAG213/215/216 NFC tags (coins, stickers, cards) using an
 **ACS ACR122U** (or any PC/SC CCID reader) on macOS. Ships as both a
 double-clickable **Mac app** and a command-line tool.
 
@@ -68,7 +68,8 @@ rewrites the message.
 
 ## Notes / limits
 
-- Targets MIFARE Classic **1K** (16 sectors). NTAG21x tags are already
+- Supports MIFARE Classic **1K** (16 sectors) and NTAG213/215/216 in the Mac
+  app (auto-detected). The `nfctag` CLI is still MIFARE Classic only. NTAG21x tags are already
   NDEF-formatted from the factory and work with phone apps directly.
 - Max message on a 1K tag is ~700 bytes; plenty for links.
 - A tag must be placed on the reader for each command.
