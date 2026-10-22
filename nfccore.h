@@ -4,6 +4,7 @@
    Returns 0 on success, non-zero on error (message still in log). */
 int amigo_read(char *log, int cap);
 /* Format (if needed) and write value as a URI (as_text=0) or Text (as_text=1)
-   record to the tag on the reader. Verifies by reading back. */
-int amigo_write(const char *value, int as_text, char *log, int cap);
+   record to the tag on the reader. Verifies by reading back. If lock is set and
+   the tag is NTAG21x, it is then made permanently read-only (irreversible). */
+int amigo_write(const char *value, int as_text, int lock, char *log, int cap);
 #endif

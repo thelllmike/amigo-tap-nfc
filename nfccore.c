@@ -138,7 +138,22 @@ static int ntag_read(void){
   parse_ndef(mem,size); return 0;
 }
 
-static int ntag_write(const BYTE *ndef,int nl){
+/* Permanently make the tag read-only (irreversible, per NTAG213/215/216 datasheet 8.5.2-8.5.3):
+   CC access byte -> 0x0F, dynamic lock bytes (RFUI bits 0), then static lock bytes on page 2. */
+static int ntag_lock(int size){
+  BYTE dyn[4]; int dpg;
+  switch(size){ case 144: dpg=0x28; memcpy(dyn,(BYTE[]){0xFF,0x0F,0x3F,0x00},4); break;
+                case 504: case 496: dpg=0x82; memcpy(dyn,(BYTE[]){0xFF,0x00,0x0F,0x00},4); break;
+                case 888: case 872: dpg=0xE2; memcpy(dyn,(BYTE[]){0xFF,0x3F,0x7F,0x00},4); break;
+                default: L("Unknown tag size; not locking.\n"); return 1; }
+  BYTE p[16]; if(!rpages(0,p)){ L("Lock failed: could not read tag.\n"); return 1; }
+  BYTE cc[4]={p[12],p[13],p[14],0x0F}, st[4]={p[8],p[9],0xFF,0xFF};
+  if(!wpage(3,cc)||!wpage(dpg,dyn)||!wpage(2,st)){ L("Lock failed.\n"); return 1; }
+  if(!rpages(0,p)||p[15]!=0x0F||p[10]!=0xFF||p[11]!=0xFF){ L("Lock could not be verified.\n"); return 1; }
+  L("Tag locked: it is now permanently read-only.\n"); return 0;
+}
+
+static int ntag_write(const BYTE *ndef,int nl,int lock){
   BYTE cc[16]; int size=ntag_size();
   if(!rpages(0,cc)){ L("Could not read tag.\n"); return 1; }
   if(cc[12]==0x00 && cc[13]==0x00 && cc[14]==0x00 && cc[15]==0x00){   /* blank CC: format */
@@ -159,7 +174,8 @@ static int ntag_write(const BYTE *ndef,int nl){
   BYTE mem[1024]; int rl=(t+15)&~15;
   if(!ntag_dump(mem,rl)){ L("Written, but read-back failed.\n"); return 1; }
   L("\nDone. Verified on tag:\n");
-  parse_ndef(mem,rl); return 0;
+  parse_ndef(mem,rl);
+  return lock ? ntag_lock(size) : 0;
 }
 
 int amigo_read(char *log,int cap){
@@ -178,14 +194,42 @@ int amigo_read(char *log,int cap){
   ndisconnect(); return 0;
 }
 
-int amigo_write(const char *value,int as_text,char *log,int cap){
+/* MIFARE Classic read-only (NFC Forum MIFARE Classic as NFC Type Tag, read-only state):
+   trailer access bits 07 8F 0F = data blocks read A|B / write never, trailer never writable.
+   Changing the trailer under our 7F 07 88 / 78 77 88 formats needs Key B (FF..FF). Irreversible. */
+static int nauth_b(int blk){
+  BYTE o[300]; DWORD ol;
+  BYTE ld[]={0xFF,0x82,0,0,6,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+  if(!transmit(ld,sizeof(ld),o,&ol)||!sw_ok(o,ol)) return 0;
+  BYTE a[]={0xFF,0x86,0,0,5,1,0,(BYTE)blk,0x61,0};
+  return transmit(a,sizeof(a),o,&ol) && sw_ok(o,ol);
+}
+static int classic_lock(void){
+  static const BYTE RO[3]={0x07,0x8F,0x0F};
+  BYTE tr[16];
+  for(int s=0;s<16;s++){                       /* only lock tags in the exact format we wrote */
+    const BYTE *k=s?KEY_NDEF:KEY_MAD, *ab=s?NDEF_TRAILER+6:MAD_TRAILER+6;
+    if(!nauth(s*4,k)||!rblk(s*4+3,tr)||memcmp(tr+6,ab,3)){ L("Sector %d is not in AmigoTap's format; not locking.\n",s); return 1; }
+  }
+  for(int s=0;s<16;s++){
+    BYTE t[16]; memcpy(t,s?NDEF_TRAILER:MAD_TRAILER,16);
+    memcpy(t+6,RO,3); t[9]=s?0x43:0xC1;          /* GPB: data sectors flagged read-only */
+    if(!nauth_b(s*4)||!wblk(s*4+3,t)){ L("Lock failed at sector %d.\n",s); return 1; }
+  }
+  for(int s=0;s<16;s++){
+    if(!nauth(s*4,s?KEY_NDEF:KEY_MAD)||!rblk(s*4+3,tr)||memcmp(tr+6,RO,3)){ L("Lock could not be verified (sector %d).\n",s); return 1; }
+  }
+  L("Tag locked: it is now permanently read-only.\n"); return 0;
+}
+
+int amigo_write(const char *value,int as_text,int lock,char *log,int cap){
   g_p=log; g_end=log+cap; if(cap>0) log[0]=0;
   if(!value||!value[0]){ L("Nothing to write — enter a link or text first.\n"); return 1; }
   if(strlen(value)>850){ L("Too long — max ~850 characters.\n"); return 1; }
   BYTE ndef[900]; int nl=build_ndef(value,as_text,ndef);
   L("Writing %s record (%d bytes)...\n", as_text?"text":"link", nl);
   if(!nconnect()) return 1;
-  if(is_ntag()){ int r=ntag_write(ndef,nl); ndisconnect(); return r; }
+  if(is_ntag()){ int r=ntag_write(ndef,nl,lock); ndisconnect(); return r; }
 
   BYTE area[45*16]; memset(area,0,sizeof(area)); int t=0;
   area[t++]=0x03;
@@ -204,7 +248,7 @@ int amigo_write(const char *value,int as_text,char *log,int cap){
   }
   int s0f=0;
   if(!nauth(0,KEY_MAD)){ if(nauth(0,KEY_FF)) s0f=1; else { L("  ! sector 0 locked\n"); fails++; } }
-  if(nauth(0,KEY_MAD)||nauth(0,KEY_FF)){
+  if(s0f?nauth(0,KEY_FF):nauth_b(0)){            /* MAD blocks (78 77 88) are writable with Key B only */
     if(!wblk(1,mad)) fails++; if(!wblk(2,mad+16)) fails++;
     if(s0f){ if(!wblk(3,MAD_TRAILER)) fails++; }
   }
@@ -216,5 +260,6 @@ int amigo_write(const char *value,int as_text,char *log,int cap){
     for(int b=0;b<3;b++){ BYTE buf[16]; if(rblk(base+b,buf)){ memcpy(mem+ml,buf,16); ml+=16; } } }
   L("\nDone. Verified on tag:\n");
   parse_ndef(mem,ml);
-  ndisconnect(); return 0;
+  int r=lock?classic_lock():0;
+  ndisconnect(); return r;
 }

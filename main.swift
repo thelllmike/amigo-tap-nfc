@@ -4,6 +4,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var input: NSTextField!
     var asText: NSButton!
+    var lockBox: NSButton!
     var log: NSTextView!
     var writeBtn: NSButton!
     var readBtn: NSButton!
@@ -50,6 +51,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         readBtn.bezelStyle = .rounded
         v.addSubview(readBtn)
 
+        lockBox = NSButton(checkboxWithTitle: "Lock after writing (permanent)", target: nil, action: nil)
+        lockBox.frame = NSRect(x: 300, y: 268, width: 240, height: 20)
+        v.addSubview(lockBox)
+
         let scroll = NSScrollView(frame: NSRect(x: 20, y: 20, width: 520, height: 228))
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
@@ -87,7 +92,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func doWrite() {
         let val = input.stringValue
         let text: Int32 = (asText.state == .on) ? 1 : 0
-        run({ buf, cap in val.withCString { amigo_write($0, text, buf, cap) } }, verb: "Writing")
+        let lock: Int32 = (lockBox.state == .on) ? 1 : 0
+        if lock == 1 {
+            let a = NSAlert()
+            a.messageText = "Lock this tag permanently?"
+            a.informativeText = "After writing, the tag becomes read-only forever. Nobody, including you, can change or erase it.\n\n\(val)"
+            a.alertStyle = .warning
+            a.addButton(withTitle: "Write & Lock")
+            a.addButton(withTitle: "Cancel")
+            if a.runModal() != .alertFirstButtonReturn { return }
+        }
+        run({ buf, cap in val.withCString { amigo_write($0, text, lock, buf, cap) } }, verb: "Writing")
     }
 
     @objc func doRead() {
